@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+﻿// SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
@@ -71,7 +71,9 @@ static bool IgnoresExecMask(const GcnInst& inst) {
 static std::optional<u32> ResolveSetPcTarget(std::span<const GcnInst> list, u32 setpc_index,
                                              std::span<const u32> pc_map) {
     if (setpc_index < 3) {
-        return std::nullopt;
+        LOG_CRITICAL(Render_Recompiler, "ResolveSetPcTarget: setpc_index={} (must be >= 3)",
+                     setpc_index);
+        UNREACHABLE();
     }
 
     const auto& getpc = list[setpc_index - 3];
@@ -80,14 +82,37 @@ static std::optional<u32> ResolveSetPcTarget(std::span<const GcnInst> list, u32 
 
     if (getpc.opcode != Opcode::S_GETPC_B64 ||
         !(arith.opcode == Opcode::S_ADD_U32 || arith.opcode == Opcode::S_SUB_U32) ||
-        setpc.opcode != Opcode::S_SETPC_B64)
-        return std::nullopt;
+        setpc.opcode != Opcode::S_SETPC_B64) {
 
-    if (getpc.dst[0].code != setpc.src[0].code || arith.dst[0].code != setpc.src[0].code)
-        return std::nullopt;
+        // Dump the last ≤10 instructions (including failing SETPC)
+        constexpr std::size_t kMaxDump = 10;
+        std::string recent_instrs;
+        std::size_t start = (setpc_index + 1 > kMaxDump) ? setpc_index + 1 - kMaxDump : 0;
 
-    if (arith.src_count < 2 || arith.src[1].field != OperandField::LiteralConst)
-        return std::nullopt;
+        for (std::size_t i = start; i <= setpc_index && i < list.size(); ++i) {
+            recent_instrs += fmt::format("[{}] {}\n", i, static_cast<int>(list[i].opcode));
+        }
+
+        LOG_CRITICAL(Render_Recompiler,
+                     "ResolveSetPcTarget: opcode pattern mismatch got "
+                     "{{{}, {}, {}}}\n"
+                     "Last ≤10 instructions leading up to error:\n{}",
+                     static_cast<int>(getpc.opcode), static_cast<int>(arith.opcode),
+                     static_cast<int>(setpc.opcode), recent_instrs);
+        UNREACHABLE();
+    }
+
+    if (getpc.dst[0].code != setpc.src[0].code || arith.dst[0].code != setpc.src[0].code) {
+        LOG_CRITICAL(Render_Recompiler, "Registers don't match: {} != {} or {} != {}",
+                     getpc.dst[0].code, setpc.src[0].code, arith.dst[0].code, setpc.src[0].code);
+        UNREACHABLE();
+    }
+
+    if (arith.src_count < 2 || arith.src[1].field != OperandField::LiteralConst) {
+        LOG_CRITICAL(Render_Recompiler, "expected literal constant in second operand, got {}",
+                     static_cast<int>(arith.src[1].field));
+        UNREACHABLE();
+    }
 
     const u32 imm = arith.src[1].code;
 
@@ -125,15 +150,8 @@ void CFG::EmitLabels() {
         if (inst.IsUnconditionalBranch()) {
             u32 target = inst.BranchTarget(pc);
             if (inst.opcode == Opcode::S_SETPC_B64) {
-                if (auto t = ResolveSetPcTarget(inst_list, i, index_to_pc)) {
-                    target = *t;
-                } else {
-                    ASSERT_MSG(
-                        false,
-                        "S_SETPC_B64 without a resolvable offset at PC {:#x} (Index {}): Involved "
-                        "instructions not recognized or invalid pattern",
-                        pc, i);
-                }
+                auto t = ResolveSetPcTarget(inst_list, i, index_to_pc);
+                target = *t;
             }
             AddLabel(target);
             // Emit this label so that the block ends with the branching instruction
@@ -329,10 +347,6 @@ void CFG::LinkBlocks() {
         u32 target_pc = 0;
         if (end_inst.opcode == Opcode::S_SETPC_B64) {
             auto tgt = ResolveSetPcTarget(inst_list, block.end_index, index_to_pc);
-            ASSERT_MSG(tgt,
-                       "S_SETPC_B64 without a resolvable offset at PC {:#x} (Index {}): Involved "
-                       "instructions not recognized or invalid pattern",
-                       branch_pc, block.end_index);
             target_pc = *tgt;
         } else {
             target_pc = end_inst.BranchTarget(branch_pc);
